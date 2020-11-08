@@ -42,8 +42,8 @@ fn check_alc_errors(device: *mut ALCdevice, lineno: u32) -> ALCenum {
 fn print_alc_info(device: *mut ALCdevice) {
     if !device.is_null() {
         print!("\n");
-        let mut devname = if unsafe { alcIsExtensionPresent(device, alc_str("ALC_ENUMERATE_ALL_EXT\0")) }
-            != ALC_FALSE as ALCboolean
+        let mut devname = if unsafe { alcIsExtensionPresent(device, alc_str("ALC_ENUMERATE_ALL_EXT\0")) } !=
+            ALC_FALSE as ALCboolean
         {
             unsafe { alcGetString(device, ALC_ALL_DEVICES_SPECIFIER as ALCenum) }
         } else {

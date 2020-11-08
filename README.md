@@ -1,6 +1,6 @@
 # openal-soft-sys
 
-supported openal-soft rev: **a4bfba4cb56686860c3edd9d910703b1c0caf209**.
+supported openal-soft rev: **0498ca200d95b3c6f6411c6485bbae1d611ef5f6**.
 
 # requires
 
