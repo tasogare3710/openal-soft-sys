@@ -1,29 +1,55 @@
 use openal_soft_sys::alext::*;
+use std::borrow::Cow;
+use std::ptr;
 
-fn string_lossy_from_ptr<'a>(ptr: *const std::os::raw::c_char) -> std::borrow::Cow<'a, str> {
+fn string_lossy_from_ptr<'a>(ptr: *const std::os::raw::c_char) -> Cow<'a, str> {
     unsafe { std::ffi::CStr::from_ptr(ptr) }.to_string_lossy()
 }
 
-fn al_str(s: &str) -> *const ALchar {
+fn str_ptr<T>(s: &str) -> *const T {
     s.as_ptr() as _
 }
 
-fn alc_str(s: &str) -> *const ALCchar {
-    s.as_ptr() as _
-}
+mod alc {
+    use openal_soft_sys::alext::*;
+    use std::ffi::CStr;
 
-fn print_device_list(list: *const ALCchar) {
-    let list = string_lossy_from_ptr(list);
-    for v in list.split('\0') {
-        println!("\t{}", v);
+    pub fn is_extension_present(device: *mut ALCdevice, ext: &str) -> bool {
+        let p = unsafe { alcIsExtensionPresent(device, super::str_ptr(ext)) };
+        p == (ALC_TRUE as ALCboolean)
+    }
+
+    pub fn get_string<'a>(device: *mut ALCdevice, param: ALCenum) -> &'a CStr {
+        let s = unsafe { alcGetString(device, param) };
+        let s = unsafe { std::ffi::CStr::from_ptr(s) };
+        s
     }
 }
 
-fn print_list(list: *const ALCchar, separator: char) {
-    let list = string_lossy_from_ptr(list);
-    for v in list.split(' ') {
+mod al {
+    use openal_soft_sys::alext::*;
+    use std::ffi::CStr;
+
+    pub fn is_extension_present(ext: &str) -> bool {
+        let p = unsafe { alIsExtensionPresent(super::str_ptr(ext)) };
+        p == (AL_TRUE as ALboolean)
+    }
+
+    pub fn get_string<'a>(param: ALenum) -> &'a CStr {
+        let s = unsafe { alGetString(param) };
+        let s = unsafe { std::ffi::CStr::from_ptr(s) };
+        s
+    }
+}
+
+fn print_list_with_terminator(list: Cow<str>, separator: char, terminator: char) {
+    for v in list.split(terminator) {
         print!("\t{}{}", v, separator);
     }
+}
+
+fn print_list(list: Cow<str>, separator: char) {
+    print_list_with_terminator(list, separator, ' ');
 }
 
 fn check_alc_errors(device: *mut ALCdevice, lineno: u32) -> ALCenum {
@@ -40,20 +66,22 @@ fn check_alc_errors(device: *mut ALCdevice, lineno: u32) -> ALCenum {
 }
 
 fn print_alc_info(device: *mut ALCdevice) {
-    if !device.is_null() {
-        print!("\n");
-        let mut devname = if unsafe { alcIsExtensionPresent(device, alc_str("ALC_ENUMERATE_ALL_EXT\0")) } !=
-            ALC_FALSE as ALCboolean
-        {
-            unsafe { alcGetString(device, ALC_ALL_DEVICES_SPECIFIER as ALCenum) }
-        } else {
-            std::ptr::null()
-        };
+    let s = alc::get_string(device, ALC_ALL_DEVICES_SPECIFIER as ALCenum);
+    if check_alc_errors(device, line!()) == ALC_NO_ERROR as ALCenum {
+        println!(
+            "playback device{}:\n\t{:?}",
+            if device.is_null() { " (null)" } else { "" },
+            s.to_string_lossy()
+        );
+    }
 
-        if check_alc_errors(device, line!()) != ALC_NO_ERROR as ALCenum || devname.is_null() {
-            devname = unsafe { alcGetString(device, ALC_DEVICE_SPECIFIER as ALCenum) };
-            println!("** Info for device {:?} **", devname);
-        }
+    let s = alc::get_string(device, ALC_CAPTURE_DEVICE_SPECIFIER as ALCenum);
+    if check_alc_errors(device, line!()) == ALC_NO_ERROR as ALCenum {
+        println!(
+            "capture device{}:\n\t{:?}",
+            if device.is_null() { " (null)" } else { "" },
+            s.to_string_lossy()
+        );
     }
 
     let mut major: ALCint = 0;
@@ -67,16 +95,18 @@ fn print_alc_info(device: *mut ALCdevice) {
         println!("ALC version: {}.{}", major, minor);
     }
 
-    if !device.is_null() {
-        println!("ALC extensions:");
-        print_list(unsafe { alcGetString(device, ALC_EXTENSIONS as ALCenum) }, '\n');
-        check_alc_errors(device, line!());
+    println!("ALC extensions:");
+    let s = alc::get_string(device, ALC_EXTENSIONS as ALCenum);
+    if check_alc_errors(device, line!()) == ALC_NO_ERROR as ALCenum {
+        let s = s.to_string_lossy();
+        print_list(s, '\n');
     }
 }
 
 fn print_hrtf_info(device: *mut ALCdevice) {
-    if unsafe { alcIsExtensionPresent(device, alc_str("ALC_SOFT_HRTF\0")) } == ALC_FALSE as ALCboolean {
-        println!("HRTF extension not available");
+    println!("Available HRTFs:");
+    if !alc::is_extension_present(device, "ALC_SOFT_HRTF\0") {
+        println!("\tHRTF extension not available");
         return;
     }
 
@@ -89,21 +119,23 @@ fn print_hrtf_info(device: *mut ALCdevice) {
             &mut num_hrtfs as *mut ALCint,
         )
     };
-    if num_hrtfs != 0 {
-        println!("Available HRTFs:");
-        for i in 0..num_hrtfs {
-            // definition AL_ALEXT_PROTOTYPES macro
-            let name = string_lossy_from_ptr(unsafe {
-                alcGetStringiSOFT(
-                    device as *mut ALCdevice,
-                    ALC_HRTF_SPECIFIER_SOFT as ALCenum,
-                    i as ALCsizei,
-                )
-            });
-            println!("\t{}", name);
-        }
-    } else {
-        println!("No HRTFs found");
+    check_alc_errors(device, line!());
+
+    if num_hrtfs == 0 {
+        println!("\tNo HRTFs found");
+        return;
+    }
+
+    for i in 0..num_hrtfs {
+        let name = unsafe {
+            alcGetStringiSOFT(
+                device as *mut ALCdevice,
+                ALC_HRTF_SPECIFIER_SOFT as ALCenum,
+                i as ALCsizei,
+            )
+        };
+        let name = string_lossy_from_ptr(name);
+        println!("\t{}", name);
     }
     check_alc_errors(device, line!());
 }
@@ -123,50 +155,57 @@ fn check_al_errors(lineno: u32) -> ALenum {
 
 fn print_al_info() {
     println!(
-        "OpenAL vendor string: {}",
-        string_lossy_from_ptr(unsafe { alGetString(AL_VENDOR as ALenum) })
+        "OpenAL vendor: {:?}",
+        al::get_string(AL_VENDOR as ALenum).to_string_lossy()
     );
     println!(
-        "OpenAL renderer string: {}",
-        string_lossy_from_ptr(unsafe { alGetString(AL_RENDERER as ALenum) })
+        "OpenAL renderer: {:?}",
+        al::get_string(AL_RENDERER as ALenum).to_string_lossy()
     );
     println!(
-        "OpenAL version string: {}",
-        string_lossy_from_ptr(unsafe { alGetString(AL_VERSION as ALenum) })
+        "OpenAL version: {:?}",
+        al::get_string(AL_VERSION as ALenum).to_string_lossy()
     );
     println!("OpenAL extensions:");
-    print_list(unsafe { alGetString(AL_EXTENSIONS as ALenum) } as *const ALCchar, '\n');
+
+    let s = al::get_string(AL_EXTENSIONS as ALenum);
+    print_list(s.to_string_lossy(), '\n');
     check_al_errors(line!());
 }
 
 fn print_resampler_info() {
-    if unsafe { alIsExtensionPresent(al_str("AL_SOFT_source_resampler\0")) } == AL_FALSE as ALboolean {
-        println!("Resampler info not available");
+    println!("Available resamplers:");
+    if !al::is_extension_present("AL_SOFT_source_resampler\0") {
+        println!("Resampler extension not available");
         return;
     }
 
     let num_resamplers = unsafe { alGetInteger(AL_NUM_RESAMPLERS_SOFT as ALenum) };
-    if num_resamplers != 0 {
-        let def_resampler = unsafe { alGetInteger(AL_DEFAULT_RESAMPLER_SOFT as ALenum) };
-        println!("Available resamplers:");
-        for i in 0..num_resamplers {
-            // definition AL_ALEXT_PROTOTYPES macro
-            let name = unsafe { alGetStringiSOFT(AL_RESAMPLER_NAME_SOFT as ALenum, i) };
-            println!(
-                "\t{}{}",
-                string_lossy_from_ptr(name),
-                if i == def_resampler { " *" } else { "" }
-            );
-        }
-    } else {
-        println!("!!! No resamplers found !!!");
-    }
     check_al_errors(line!());
+
+    if num_resamplers == 0 {
+        println!("Resamplers not found");
+        return;
+    }
+
+    let def_resampler = unsafe { alGetInteger(AL_DEFAULT_RESAMPLER_SOFT as ALenum) };
+    check_al_errors(line!());
+
+    for i in 0..num_resamplers {
+        let name = unsafe { alGetStringiSOFT(AL_RESAMPLER_NAME_SOFT as ALenum, i) };
+        check_al_errors(line!());
+        println!(
+            "\t{}{}",
+            string_lossy_from_ptr(name),
+            if i == def_resampler { " <default>" } else { "" }
+        );
+    }
 }
 
 fn print_efx_info(device: *mut ALCdevice) {
-    if unsafe { alcIsExtensionPresent(device, alc_str("ALC_EXT_EFX\0")) } == ALC_FALSE as ALCboolean {
-        println!("EFX not available");
+    println!("Available EFX");
+    if !alc::is_extension_present(device, "ALC_EXT_EFX\0") {
+        println!("\tEFX extension not available");
         return;
     }
 
@@ -178,17 +217,17 @@ fn print_efx_info(device: *mut ALCdevice) {
     }
 
     if check_alc_errors(device, line!()) == ALC_NO_ERROR as ALCenum {
-        println!("EFX version: {}.{}", major, minor);
+        println!("\tversion: {}.{}", major, minor);
     }
 
     let mut sends: ALCint = 0;
     unsafe { alcGetIntegerv(device, ALC_MAX_AUXILIARY_SENDS as ALCenum, 1, &mut sends) };
     if check_alc_errors(device, line!()) == ALC_NO_ERROR as ALCenum {
-        println!("Max auxiliary sends: {}", sends);
+        println!("\tMax auxiliary sends: {}", sends);
     }
 
     fn valid_enum(filter: &&&str) -> bool {
-        let val = unsafe { alGetEnumValue(alc_str(filter)) };
+        let val = unsafe { alGetEnumValue(str_ptr(filter)) };
         (unsafe { alGetError() } == AL_NO_ERROR as ALenum) && val != 0 && val != -1
     }
     fn print_enum(e: &&str) {
@@ -221,7 +260,7 @@ fn print_efx_info(device: *mut ALCdevice) {
     .for_each(print_enum);
 
     println!("Supported dedeffects:");
-    if unsafe { alcIsExtensionPresent(device, alc_str("ALC_EXT_DEDICATED\0")) } == ALC_TRUE as ALCboolean {
+    if alc::is_extension_present(device, "ALC_EXT_DEDICATED\0") {
         [
             "AL_EFFECT_DEDICATED_DIALOGUE\0",
             "AL_EFFECT_DEDICATED_LOW_FREQUENCY_EFFECT\0",
@@ -232,13 +271,30 @@ fn print_efx_info(device: *mut ALCdevice) {
     }
 }
 
+// FIXME: 書き直し
 fn main() -> anyhow::Result<()> {
-    let device = unsafe { alcOpenDevice(std::ptr::null()) };
+    assert!(alc::is_extension_present(ptr::null_mut(), "ALC_ENUMERATE_ALL_EXT\0"));
+
+    let s = alc::get_string(ptr::null_mut(), ALC_DEFAULT_ALL_DEVICES_SPECIFIER as ALCenum);
+    println!("DEFAULT_ALL_DEVICES:\n\t{:?}", s.to_string_lossy());
+
+    let s = alc::get_string(ptr::null_mut(), ALC_ALL_DEVICES_SPECIFIER as ALCenum);
+    println!("ALL_DEVICES:\n\t{:?}", s.to_string_lossy());
+
+    let s = alc::get_string(ptr::null_mut(), ALC_CAPTURE_DEFAULT_DEVICE_SPECIFIER as ALCenum);
+    println!("CAPTURE_DEFAULT_DEVICE:\n\t{:?}", s.to_string_lossy());
+
+    let s = alc::get_string(ptr::null_mut(), ALC_CAPTURE_DEVICE_SPECIFIER as ALCenum);
+    println!("CAPTURE_DEVICE:\n\t{:?}", s.to_string_lossy());
+
+    println!();
+
+    let device = unsafe { alcOpenDevice(ptr::null()) };
     if device.is_null() {
         return Err(anyhow::anyhow!("Failed to open NULL"));
     }
 
-    let context = unsafe { alcCreateContext(device, std::ptr::null()) };
+    let context = unsafe { alcCreateContext(device, ptr::null()) };
     if context.is_null() {
         unsafe { alcCloseDevice(device) };
         return Err(anyhow::anyhow!("!!! Failed to set a context !!!"));
@@ -252,34 +308,21 @@ fn main() -> anyhow::Result<()> {
         return Err(anyhow::anyhow!("!!! Failed to set a context !!!"));
     }
 
-    if unsafe { alcIsExtensionPresent(device, alc_str("ALC_ENUMERATE_ALL_EXT\0")) } != ALC_FALSE as ALCboolean {
-        let d = string_lossy_from_ptr(unsafe {
-            alcGetString(std::ptr::null_mut(), ALC_DEFAULT_ALL_DEVICES_SPECIFIER as ALCenum)
-        });
-        println!("Default playback device:\n\t{}", d);
-        println!("Available playback devices:");
-        print_device_list(unsafe { alcGetString(device, ALC_ALL_DEVICES_SPECIFIER as ALCenum) });
-    } else {
-        let d = string_lossy_from_ptr(unsafe {
-            alcGetString(std::ptr::null_mut(), ALC_DEFAULT_DEVICE_SPECIFIER as ALCenum)
-        });
-        println!("Default playback device:\n\t{}", d);
-        println!("Available playback devices:");
-        print_device_list(unsafe { alcGetString(device, ALC_DEVICE_SPECIFIER as ALCenum) });
+    for &device in &[ptr::null_mut(), device] {
+        println!("ALC info");
+        print_alc_info(device);
+        print_hrtf_info(device);
+        print_efx_info(device);
+        println!();
     }
 
-    println!("Available capture devices:");
-    print_device_list(unsafe { alcGetString(device, ALC_CAPTURE_DEVICE_SPECIFIER as ALCenum) });
-
-    print_alc_info(device);
-    print_hrtf_info(device);
+    println!("AL info");
     print_al_info();
     print_resampler_info();
-    print_efx_info(device);
 
     // destroy
     unsafe {
-        alcMakeContextCurrent(std::ptr::null_mut());
+        alcMakeContextCurrent(ptr::null_mut());
         alcDestroyContext(context);
         alcCloseDevice(device);
     }
