@@ -9,5 +9,5 @@ edition = "2018"
 [[example]]
 name = "openal_info"
 
-[dev-dependencies]
-anyhow = { version = "=1.0.32" }
+[dev-dependencies.anyhow]
+version = "=1.0.38"
